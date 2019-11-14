@@ -434,12 +434,9 @@
 #![recursion_limit = "128"]
 
 #[macro_use]
-extern crate error_chain;
-#[macro_use]
 extern crate quote;
 use svd_parser as svd;
 
-mod errors;
 mod generate;
 mod util;
 
@@ -461,10 +458,12 @@ pub struct DeviceSpecific {
     _extensible: (),
 }
 
-type Result<T> = std::result::Result<T, SvdError>;
-#[derive(Debug)]
+use anyhow::Result;
+#[derive(Debug, thiserror::Error)]
 pub enum SvdError {
+    #[error("Cannot format crate")]
     Fmt,
+    #[error("Cannot render SVD device")]
     Render,
 }
 
@@ -472,7 +471,7 @@ pub enum SvdError {
 pub fn generate(xml: &str, target: Target, nightly: bool) -> Result<Generation> {
     use std::fmt::Write;
 
-    let device = svd::parse(xml).unwrap(); //TODO(AJM)
+    let device = svd::parse(xml)?;
     let mut device_x = String::new();
     let items = generate::device::render(&device, target, nightly, false, &mut device_x)
         .or(Err(SvdError::Render))?;

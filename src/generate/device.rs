@@ -1,12 +1,12 @@
+use crate::svd::Device;
+use proc_macro2::{Ident, Span, TokenStream};
 use quote::ToTokens;
-use proc_macro2::{TokenStream, Ident, Span};
 use std::fs::File;
 use std::io::Write;
-use crate::svd::Device;
 
-use crate::errors::*;
 use crate::util::{self, ToSanitizedUpperCase};
 use crate::Target;
+use anyhow::Result;
 
 use crate::generate::{interrupt, peripheral};
 
@@ -104,8 +104,7 @@ pub fn render(
 
     let core_peripherals: &[_] = if fpu_present {
         &[
-            "CBP", "CPUID", "DCB", "DWT", "FPB", "FPU", "ITM", "MPU", "NVIC", "SCB", "SYST",
-            "TPIU",
+            "CBP", "CPUID", "DCB", "DWT", "FPB", "FPU", "ITM", "MPU", "NVIC", "SCB", "SYST", "TPIU",
         ]
     } else {
         &[
@@ -161,7 +160,12 @@ pub fn render(
             continue;
         }
 
-        out.extend(peripheral::render(p, &d.peripherals, &d.default_register_properties, nightly)?);
+        out.extend(peripheral::render(
+            p,
+            &d.peripherals,
+            &d.default_register_properties,
+            nightly,
+        )?);
 
         if p.registers
             .as_ref()

@@ -2,16 +2,16 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use quote::ToTokens;
-use proc_macro2::TokenStream;
-use crate::svd::{Cluster, ClusterInfo, RegisterProperties, Peripheral, Register, RegisterCluster};
-use svd_parser::derive_from::DeriveFrom;
-use proc_macro2::{Ident, Span, Punct, Spacing};
+use crate::svd::{Cluster, ClusterInfo, Peripheral, Register, RegisterCluster, RegisterProperties};
 use log::warn;
+use proc_macro2::TokenStream;
+use proc_macro2::{Ident, Punct, Spacing, Span};
+use quote::ToTokens;
+use svd_parser::derive_from::DeriveFrom;
 use syn::{parse_str, Token};
 
-use crate::errors::*;
 use crate::util::{self, ToSanitizedSnakeCase, ToSanitizedUpperCase, BITS_PER_BYTE};
+use anyhow::{anyhow, bail, Context, Result};
 
 use crate::generate::register;
 
@@ -23,16 +23,20 @@ pub fn render(
 ) -> Result<Vec<TokenStream>> {
     let mut out = vec![];
 
-    let p_derivedfrom = p_original.derived_from.as_ref().and_then(|s| {
-        all_peripherals.iter().find(|x| x.name == *s)
-    });
+    let p_derivedfrom = p_original
+        .derived_from
+        .as_ref()
+        .and_then(|s| all_peripherals.iter().find(|x| x.name == *s));
 
     let p_merged = p_derivedfrom.map(|ancestor| p_original.derive_from(ancestor));
     let p = p_merged.as_ref().unwrap_or(p_original);
 
     if p_original.derived_from.is_some() && p_derivedfrom.is_none() {
-        eprintln!("Couldn't find derivedFrom original: {} for {}, skipping",
-            p_original.derived_from.as_ref().unwrap(), p_original.name);
+        eprintln!(
+            "Couldn't find derivedFrom original: {} for {}, skipping",
+            p_original.derived_from.as_ref().unwrap(),
+            p_original.name
+        );
         return Ok(out);
     }
 
@@ -97,31 +101,35 @@ pub fn render(
     }
 
     // Build up an alternate erc list by expanding any derived registers
-    let mut alt_erc :Vec<RegisterCluster> = registers.iter().filter_map(|r| {
-        match r.derived_from {
+    let mut alt_erc: Vec<RegisterCluster> = registers
+        .iter()
+        .filter_map(|r| match r.derived_from {
             Some(ref derived) => {
                 let ancestor = match reg_map.get(derived) {
                     Some(r) => r,
                     None => {
-                        eprintln!("register {} derivedFrom missing register {}", r.name, derived);
-                        return None
+                        eprintln!(
+                            "register {} derivedFrom missing register {}",
+                            r.name, derived
+                        );
+                        return None;
                     }
                 };
 
                 let d = match **ancestor {
-                    Register::Array(ref info, ref array_info) => {
-                        Some(RegisterCluster::Register(Register::Array(r.derive_from(info), array_info.clone())))
-                    }
-                    Register::Single(ref info) => {
-                        Some(RegisterCluster::Register(Register::Single(r.derive_from(info))))
-                    }
+                    Register::Array(ref info, ref array_info) => Some(RegisterCluster::Register(
+                        Register::Array(r.derive_from(info), array_info.clone()),
+                    )),
+                    Register::Single(ref info) => Some(RegisterCluster::Register(
+                        Register::Single(r.derive_from(info)),
+                    )),
                 };
 
                 d
             }
             None => Some(RegisterCluster::Register((*r).clone())),
-        }
-    }).collect();
+        })
+        .collect();
 
     // Now add the clusters to our alternate erc list
     let clusters = util::only_clusters(ercs);
@@ -508,11 +516,16 @@ fn register_or_cluster_block(
             // name, along with the region number, falling back to
             // the offset and end in case we couldn't figure out a
             // nice identifier.
-            let name = Ident::new(&format!(
-                "_reserved_{}_{}",
-                i,
-                region.compute_ident().unwrap_or_else(|| format!("{}_{}", region.offset, region.end))
-            ), span);
+            let name = Ident::new(
+                &format!(
+                    "_reserved_{}_{}",
+                    i,
+                    region
+                        .compute_ident()
+                        .unwrap_or_else(|| format!("{}_{}", region.offset, region.end))
+                ),
+                span,
+            );
             let pad = (region.end - region.offset) as usize;
             fields.extend(quote! {
                 #name: [u8; #pad],
@@ -521,10 +534,13 @@ fn register_or_cluster_block(
         last_end = region.end;
     }
 
-    let name = Ident::new(&match name {
-        Some(name) => name.to_sanitized_upper_case(),
-        None => "RegisterBlock".into(),
-    }, span);
+    let name = Ident::new(
+        &match name {
+            Some(name) => name.to_sanitized_upper_case(),
+            None => "RegisterBlock".into(),
+        },
+        span,
+    );
 
     let accessors = if have_accessors {
         quote! {
@@ -600,12 +616,12 @@ fn expand_cluster(cluster: &Cluster, defs: &RegisterProperties) -> Result<Vec<Re
     let defs = cluster.default_register_properties.derive_from(defs);
 
     let cluster_size = cluster_size_in_bits(cluster, &defs)
-        .chain_err(|| format!("Cluster {} has no determinable `size` field", cluster.name))?;
+        .with_context(|| format!("Cluster {} has no determinable `size` field", cluster.name))?;
 
     match cluster {
         Cluster::Single(info) => cluster_expanded.push(RegisterBlockField {
             field: convert_svd_cluster(cluster),
-            description: info.description.clone(),
+            description: info.description.clone().unwrap_or_default(),
             offset: info.address_offset,
             size: cluster_size,
         }),
@@ -625,7 +641,7 @@ fn expand_cluster(cluster: &Cluster, defs: &RegisterProperties) -> Result<Vec<Re
             if array_convertible {
                 cluster_expanded.push(RegisterBlockField {
                     field: convert_svd_cluster(&cluster),
-                    description: info.description.clone(),
+                    description: info.description.clone().unwrap_or_default(),
                     offset: info.address_offset,
                     size: cluster_size * array_info.dim,
                 });
@@ -633,7 +649,7 @@ fn expand_cluster(cluster: &Cluster, defs: &RegisterProperties) -> Result<Vec<Re
                 for (field_num, field) in expand_svd_cluster(cluster).iter().enumerate() {
                     cluster_expanded.push(RegisterBlockField {
                         field: field.clone(),
-                        description: info.description.clone(),
+                        description: info.description.clone().unwrap_or_default(),
                         offset: info.address_offset + field_num as u32 * array_info.dim_increment,
                         size: cluster_size,
                     });
@@ -657,7 +673,7 @@ fn expand_register(
     let register_size = register
         .size
         .or(defs.size)
-        .ok_or_else(|| format!("Register {} has no `size` field", register.name))?;
+        .ok_or_else(|| anyhow!("Register {} has no `size` field", register.name))?;
 
     match register {
         Register::Single(info) => register_expanded.push(RegisterBlockField {
@@ -713,7 +729,8 @@ fn cluster_block(
     let mut mod_items: Vec<TokenStream> = vec![];
 
     // name_sc needs to take into account array type.
-    let description = util::escape_brackets(util::respace(&c.description).as_ref());
+    let description =
+        util::escape_brackets(util::respace(&c.description.clone().unwrap_or_default()).as_ref());
 
     // Generate the register block.
     let mod_name = match c {
@@ -820,10 +837,10 @@ fn expand_svd_register(register: &Register, name: Option<&str>) -> Vec<syn::Fiel
 fn convert_svd_register(register: &Register, name: Option<&str>) -> syn::Field {
     let name_to_ty = |name: &String, ns: Option<&str>| -> String {
         if let Some(ns) = ns {
-                String::from("self::")
-                    + &ns.to_sanitized_snake_case()
-                    + "::"
-                    + &name.to_sanitized_upper_case()
+            String::from("self::")
+                + &ns.to_sanitized_snake_case()
+                + "::"
+                + &name.to_sanitized_upper_case()
         } else {
             name.to_sanitized_upper_case().to_string()
         }
@@ -832,7 +849,7 @@ fn convert_svd_register(register: &Register, name: Option<&str>) -> syn::Field {
     match register {
         Register::Single(info) => new_syn_field(
             &info.name.to_sanitized_snake_case(),
-            syn::Type::Path(parse_str::<syn::TypePath>(&name_to_ty(&info.name, name)).unwrap())
+            syn::Type::Path(parse_str::<syn::TypePath>(&name_to_ty(&info.name, name)).unwrap()),
         ),
         Register::Array(info, array_info) => {
             let has_brackets = info.name.contains("[%s]");
@@ -843,9 +860,14 @@ fn convert_svd_register(register: &Register, name: Option<&str>) -> syn::Field {
                 info.name.replace("%s", "")
             };
 
-            let ty = syn::Type::Array(parse_str::<syn::TypeArray>(
-                &format!("[{};{}]", name_to_ty(&nb_name, name), u64::from(array_info.dim))
-            ).unwrap());
+            let ty = syn::Type::Array(
+                parse_str::<syn::TypeArray>(&format!(
+                    "[{};{}]",
+                    name_to_ty(&nb_name, name),
+                    u64::from(array_info.dim)
+                ))
+                .unwrap(),
+            );
 
             new_syn_field(&nb_name.to_sanitized_snake_case(), ty)
         }
@@ -905,7 +927,9 @@ fn convert_svd_cluster(cluster: &Cluster) -> syn::Field {
     match cluster {
         Cluster::Single(info) => new_syn_field(
             &info.name.to_sanitized_snake_case(),
-            syn::Type::Path(parse_str::<syn::TypePath>(&info.name.to_sanitized_upper_case()).unwrap())
+            syn::Type::Path(
+                parse_str::<syn::TypePath>(&info.name.to_sanitized_upper_case()).unwrap(),
+            ),
         ),
         Cluster::Array(info, array_info) => {
             let has_brackets = info.name.contains("[%s]");
@@ -916,9 +940,14 @@ fn convert_svd_cluster(cluster: &Cluster) -> syn::Field {
                 info.name.replace("%s", "")
             };
 
-            let ty = syn::Type::Array(parse_str::<syn::TypeArray>(
-                &format!("[{};{}]", &name.to_sanitized_upper_case(), u64::from(array_info.dim))
-            ).unwrap());
+            let ty = syn::Type::Array(
+                parse_str::<syn::TypeArray>(&format!(
+                    "[{};{}]",
+                    &name.to_sanitized_upper_case(),
+                    u64::from(array_info.dim)
+                ))
+                .unwrap(),
+            );
 
             new_syn_field(&name.to_sanitized_snake_case(), ty)
         }
@@ -929,7 +958,9 @@ fn new_syn_field(ident: &str, ty: syn::Type) -> syn::Field {
     let span = Span::call_site();
     syn::Field {
         ident: Some(Ident::new(ident, span)),
-        vis: syn::Visibility::Public(syn::VisPublic{ pub_token: Token![pub](span) }),
+        vis: syn::Visibility::Public(syn::VisPublic {
+            pub_token: Token![pub](span),
+        }),
         attrs: vec![],
         colon_token: Some(Token![:](span)),
         ty,
