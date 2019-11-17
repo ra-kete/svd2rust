@@ -104,8 +104,8 @@ fn run() -> Result<()> {
     }
 
     if target == Target::CortexM {
-        writeln!(File::create("device.x").unwrap(), "{}", device_x).unwrap();
-        writeln!(File::create("build.rs").unwrap(), "{}", build_rs()).unwrap();
+        writeln!(File::create("device.x")?, "{}", device_x)?;
+        writeln!(File::create("build.rs")?, "{}", build_rs())?;
     }
 
     Ok(())

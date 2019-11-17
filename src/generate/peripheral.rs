@@ -31,11 +31,10 @@ pub fn render(
     let p_merged = p_derivedfrom.map(|ancestor| p_original.derive_from(ancestor));
     let p = p_merged.as_ref().unwrap_or(p_original);
 
-    if p_original.derived_from.is_some() && p_derivedfrom.is_none() {
+    if let (Some(df), None) = (p_original.derived_from.as_ref(), &p_derivedfrom) {
         eprintln!(
             "Couldn't find derivedFrom original: {} for {}, skipping",
-            p_original.derived_from.as_ref().unwrap(),
-            p_original.name
+            df, p_original.name
         );
         return Ok(out);
     }
@@ -44,13 +43,12 @@ pub fn render(
     let name_pc = Ident::new(&p.name.to_sanitized_upper_case(), span);
     let address = util::hex(p.base_address as u64);
     let description = util::respace(p.description.as_ref().unwrap_or(&p.name));
-    let derive_regs = p_derivedfrom.is_some() && p_original.registers.is_none();
 
     let name_sc = Ident::new(&p.name.to_sanitized_snake_case(), span);
-    let base = if derive_regs {
-        Ident::new(&p_derivedfrom.unwrap().name.to_sanitized_snake_case(), span)
+    let (derive_regs, base) = if let (Some(df), None) = (p_derivedfrom, &p_original.registers) {
+        (true, Ident::new(&df.name.to_sanitized_snake_case(), span))
     } else {
-        name_sc.clone()
+        (false, name_sc.clone())
     };
 
     // Insert the peripheral structure
@@ -620,7 +618,7 @@ fn expand_cluster(cluster: &Cluster, defs: &RegisterProperties) -> Result<Vec<Re
 
     match cluster {
         Cluster::Single(info) => cluster_expanded.push(RegisterBlockField {
-            field: convert_svd_cluster(cluster),
+            field: convert_svd_cluster(cluster)?,
             description: info.description.clone().unwrap_or_default(),
             offset: info.address_offset,
             size: cluster_size,
@@ -640,13 +638,13 @@ fn expand_cluster(cluster: &Cluster, defs: &RegisterProperties) -> Result<Vec<Re
 
             if array_convertible {
                 cluster_expanded.push(RegisterBlockField {
-                    field: convert_svd_cluster(&cluster),
+                    field: convert_svd_cluster(&cluster)?,
                     description: info.description.clone().unwrap_or_default(),
                     offset: info.address_offset,
                     size: cluster_size * array_info.dim,
                 });
             } else {
-                for (field_num, field) in expand_svd_cluster(cluster).iter().enumerate() {
+                for (field_num, field) in expand_svd_cluster(cluster)?.iter().enumerate() {
                     cluster_expanded.push(RegisterBlockField {
                         field: field.clone(),
                         description: info.description.clone().unwrap_or_default(),
@@ -677,8 +675,8 @@ fn expand_register(
 
     match register {
         Register::Single(info) => register_expanded.push(RegisterBlockField {
-            field: convert_svd_register(register, name),
-            description: info.description.clone().unwrap_or_else(|| "".to_string()),
+            field: convert_svd_register(register, name)?,
+            description: info.description.clone().unwrap_or_default(),
             offset: info.address_offset,
             size: register_size,
         }),
@@ -697,16 +695,16 @@ fn expand_register(
 
             if array_convertible {
                 register_expanded.push(RegisterBlockField {
-                    field: convert_svd_register(&register, name),
-                    description: info.description.clone().unwrap_or_else(|| "".to_string()),
+                    field: convert_svd_register(&register, name)?,
+                    description: info.description.clone().unwrap_or_default(),
                     offset: info.address_offset,
                     size: register_size * array_info.dim,
                 });
             } else {
-                for (field_num, field) in expand_svd_register(register, name).iter().enumerate() {
+                for (field_num, field) in expand_svd_register(register, name)?.iter().enumerate() {
                     register_expanded.push(RegisterBlockField {
                         field: field.clone(),
-                        description: info.description.clone().unwrap_or_else(|| "".to_string()),
+                        description: info.description.clone().unwrap_or_default(),
                         offset: info.address_offset + field_num as u32 * array_info.dim_increment,
                         size: register_size,
                     });
@@ -776,8 +774,11 @@ fn cluster_block(
 
 /// Takes a svd::Register which may be a register array, and turn in into
 /// a list of syn::Field where the register arrays have been expanded.
-fn expand_svd_register(register: &Register, name: Option<&str>) -> Vec<syn::Field> {
-    let name_to_ty = |name: &String, ns: Option<&str>| -> syn::Type {
+fn expand_svd_register(
+    register: &Register,
+    name: Option<&str>,
+) -> Result<Vec<syn::Field>, syn::Error> {
+    let name_to_ty = |name: &String, ns: Option<&str>| -> Result<syn::Type, syn::Error> {
         let ident = if let Some(ns) = ns {
             Cow::Owned(
                 String::from("self::")
@@ -789,13 +790,13 @@ fn expand_svd_register(register: &Register, name: Option<&str>) -> Vec<syn::Fiel
             name.to_sanitized_upper_case()
         };
 
-        syn::Type::Path(parse_str::<syn::TypePath>(&ident).unwrap())
+        Ok(syn::Type::Path(parse_str::<syn::TypePath>(&ident)?))
     };
 
     let mut out = vec![];
 
     match register {
-        Register::Single(_info) => out.push(convert_svd_register(register, name)),
+        Register::Single(_info) => out.push(convert_svd_register(register, name)?),
         Register::Array(info, array_info) => {
             let has_brackets = info.name.contains("[%s]");
 
@@ -824,17 +825,17 @@ fn expand_svd_register(register: &Register, name: Option<&str>) -> Vec<syn::Fiel
                     info.name.replace("%s", "")
                 };
 
-                let ty = name_to_ty(&ty_name, name);
+                let ty = name_to_ty(&ty_name, name)?;
 
                 out.push(new_syn_field(&nb_name.to_sanitized_snake_case(), ty));
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Convert a parsed `Register` into its `Field` equivalent
-fn convert_svd_register(register: &Register, name: Option<&str>) -> syn::Field {
+fn convert_svd_register(register: &Register, name: Option<&str>) -> Result<syn::Field, syn::Error> {
     let name_to_ty = |name: &String, ns: Option<&str>| -> String {
         if let Some(ns) = ns {
             String::from("self::")
@@ -846,10 +847,10 @@ fn convert_svd_register(register: &Register, name: Option<&str>) -> syn::Field {
         }
     };
 
-    match register {
+    Ok(match register {
         Register::Single(info) => new_syn_field(
             &info.name.to_sanitized_snake_case(),
-            syn::Type::Path(parse_str::<syn::TypePath>(&name_to_ty(&info.name, name)).unwrap()),
+            syn::Type::Path(parse_str::<syn::TypePath>(&name_to_ty(&info.name, name))?),
         ),
         Register::Array(info, array_info) => {
             let has_brackets = info.name.contains("[%s]");
@@ -860,31 +861,24 @@ fn convert_svd_register(register: &Register, name: Option<&str>) -> syn::Field {
                 info.name.replace("%s", "")
             };
 
-            let ty = syn::Type::Array(
-                parse_str::<syn::TypeArray>(&format!(
-                    "[{};{}]",
-                    name_to_ty(&nb_name, name),
-                    u64::from(array_info.dim)
-                ))
-                .unwrap(),
-            );
+            let ty = syn::Type::Array(parse_str::<syn::TypeArray>(&format!(
+                "[{};{}]",
+                name_to_ty(&nb_name, name),
+                u64::from(array_info.dim)
+            ))?);
 
             new_syn_field(&nb_name.to_sanitized_snake_case(), ty)
         }
-    }
+    })
 }
 
 /// Takes a svd::Cluster which may contain a register array, and turn in into
 /// a list of syn::Field where the register arrays have been expanded.
-fn expand_svd_cluster(cluster: &Cluster) -> Vec<syn::Field> {
-    let name_to_ty = |name: &String| -> syn::Type {
-        syn::Type::Path(parse_str::<syn::TypePath>(&name.to_sanitized_upper_case()).unwrap())
-    };
-
+fn expand_svd_cluster(cluster: &Cluster) -> Result<Vec<syn::Field>, syn::Error> {
     let mut out = vec![];
 
     match &cluster {
-        Cluster::Single(_info) => out.push(convert_svd_cluster(cluster)),
+        Cluster::Single(_info) => out.push(convert_svd_cluster(cluster)?),
         Cluster::Array(info, array_info) => {
             let has_brackets = info.name.contains("[%s]");
 
@@ -913,23 +907,25 @@ fn expand_svd_cluster(cluster: &Cluster) -> Vec<syn::Field> {
                     info.name.replace("%s", "")
                 };
 
-                let ty = name_to_ty(&ty_name);
+                let ty = syn::Type::Path(parse_str::<syn::TypePath>(
+                    &ty_name.to_sanitized_upper_case(),
+                )?);
 
                 out.push(new_syn_field(&name.to_sanitized_snake_case(), ty));
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Convert a parsed `Cluster` into its `Field` equivalent
-fn convert_svd_cluster(cluster: &Cluster) -> syn::Field {
-    match cluster {
+fn convert_svd_cluster(cluster: &Cluster) -> Result<syn::Field, syn::Error> {
+    Ok(match cluster {
         Cluster::Single(info) => new_syn_field(
             &info.name.to_sanitized_snake_case(),
-            syn::Type::Path(
-                parse_str::<syn::TypePath>(&info.name.to_sanitized_upper_case()).unwrap(),
-            ),
+            syn::Type::Path(parse_str::<syn::TypePath>(
+                &info.name.to_sanitized_upper_case(),
+            )?),
         ),
         Cluster::Array(info, array_info) => {
             let has_brackets = info.name.contains("[%s]");
@@ -940,18 +936,15 @@ fn convert_svd_cluster(cluster: &Cluster) -> syn::Field {
                 info.name.replace("%s", "")
             };
 
-            let ty = syn::Type::Array(
-                parse_str::<syn::TypeArray>(&format!(
-                    "[{};{}]",
-                    &name.to_sanitized_upper_case(),
-                    u64::from(array_info.dim)
-                ))
-                .unwrap(),
-            );
+            let ty = syn::Type::Array(parse_str::<syn::TypeArray>(&format!(
+                "[{};{}]",
+                &name.to_sanitized_upper_case(),
+                u64::from(array_info.dim)
+            ))?);
 
             new_syn_field(&name.to_sanitized_snake_case(), ty)
         }
-    }
+    })
 }
 
 fn new_syn_field(ident: &str, ty: syn::Type) -> syn::Field {

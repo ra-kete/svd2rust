@@ -37,7 +37,7 @@ pub fn render(
     let description = util::escape_brackets(
         util::respace(&register.description.clone().unwrap_or_else(|| {
             warn!("Missing description for register {}", register.name);
-            "".to_string()
+            Default::default()
         }))
         .as_ref(),
     );
@@ -990,21 +990,19 @@ fn periph_all_registers<'a>(p: &'a Peripheral) -> Vec<&'a Register> {
     }
 
     loop {
-        let b = rem.pop();
-        if b.is_none() {
-            break;
-        }
-
-        let b = b.unwrap();
-        match b {
-            RegisterCluster::Register(reg) => {
-                par.push(reg);
-            }
-            RegisterCluster::Cluster(cluster) => {
-                for c in cluster.children.iter() {
-                    rem.push(c);
+        if let Some(b) = rem.pop() {
+            match b {
+                RegisterCluster::Register(reg) => {
+                    par.push(reg);
+                }
+                RegisterCluster::Cluster(cluster) => {
+                    for c in cluster.children.iter() {
+                        rem.push(c);
+                    }
                 }
             }
+        } else {
+            break;
         }
     }
     par
