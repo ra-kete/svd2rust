@@ -139,13 +139,7 @@ fn setup_logging(matches: &clap::ArgMatches) {
 
 fn main() {
     if let Err(ref e) = run() {
-        error!("{}", e);
-
-        for e in e.chain().skip(1) {
-            error!("caused by: {}", e);
-        }
-
-        error!("backtrace: {:?}", e.backtrace());
+        error!("{:?}", e);
 
         process::exit(1);
     }
