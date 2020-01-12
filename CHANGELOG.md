@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- RegisterBlock trait (like `Deref`, but don't require `self` instance,
+  only for fixed in memory peripherals)
+
 ### Fixed
 
 - Keyword sanitizing (`async`)
