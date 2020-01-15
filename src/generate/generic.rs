@@ -14,11 +14,15 @@ pub trait Writable {}
 ///
 ///This value is initial value for `write` method.
 ///It can be also directly writed to register by `reset` method.
-pub trait ResetValue {
-    ///Register size
-    type Type;
+pub trait ResetValue: Size {
     ///Reset value of the register
     fn reset_value() -> Self::Type;
+}
+
+///Register size
+pub trait Size {
+    ///Possible values: `bool`, `u8`, `u16`, `u32`, `u64`
+    type Type: Copy;
 }
 
 ///This structure provides volatile access to register
@@ -52,9 +56,16 @@ where
     }
 }
 
+impl<U, REG> Size for Reg<U, REG>
+where
+    U: Copy,
+{
+    type Type = U;
+}
+
 impl<U, REG> Reg<U, REG>
 where
-    Self: ResetValue<Type=U> + Writable,
+    Self: ResetValue + Size<Type = U> + Writable,
     U: Copy,
 {
     ///Writes the reset value to `Writable` register
@@ -68,7 +79,7 @@ where
 
 impl<U, REG> Reg<U, REG>
 where
-    Self: ResetValue<Type=U> + Writable,
+    Self: ResetValue + Size<Type = U> + Writable,
     U: Copy
 {
     ///Writes bits to `Writable` register
